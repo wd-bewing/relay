@@ -58,6 +58,7 @@ Relay can be built and run with FIPS 140-3 compatible cryptography. In this mode
 - **Startup**: The Relay process loads the OpenSSL FIPS provider before any other crypto or TLS.
 - **TLS**: All TLS (reqwest, Redis, Kafka) should use the same OpenSSL that was built with FIPS; when linking against a FIPS-built OpenSSL and loading the FIPS provider, TLS uses FIPS-approved algorithms.
 - **Algorithms**: MD5 is not used; hashing uses SHA-256/SHA-512. HMAC uses SHA-256 or SHA-512. Ed25519 and approved TLS ciphers are used.
+- **Event normalization**: The `relay-event-normalization` crate uses regex capture group names `md5` and `sha1` only to match URL path segments that look like 32- or 40-character hex strings (e.g. `/clients/563712f9.../project/01234`). No MD5 or SHA-1 hashing is performed there; hashing in that crate uses SHA-256 where needed.
 
 ## Notes
 

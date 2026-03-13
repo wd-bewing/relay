@@ -13,6 +13,8 @@ publish = false
 default = []
 processing = ["relay-server/processing", "dep:relay-kafka"]
 crash-handler = ["relay-log/crash-handler"]
+# FIPS 140-3: load OpenSSL FIPS provider at startup; requires OpenSSL 3.x built with FIPS.
+fips = ["dep:relay-crypto", "relay-crypto/fips"]
 
 [lints]
 workspace = true
@@ -26,6 +28,7 @@ dialoguer = { workspace = true }
 hostname = { workspace = true }
 http = { workspace = true }
 relay-config = { workspace = true }
+relay-crypto = { workspace = true, optional = true }
 relay-log = { workspace = true, features = ["init"] }
 relay-server = { workspace = true }
 relay-statsd = { workspace = true }

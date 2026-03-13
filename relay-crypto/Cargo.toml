@@ -1,0 +1,31 @@
+[package]
+name = "relay-crypto"
+authors = ["Sentry <oss@sentry.io>"]
+description = "Cryptographic abstraction for Relay with FIPS 140-3 support"
+homepage = "https://getsentry.github.io/relay/"
+repository = "https://github.com/getsentry/relay"
+version = "26.2.1"
+edition = "2024"
+license-file = "../LICENSE.md"
+publish = false
+
+[features]
+default = []
+# FIPS 140-3: use OpenSSL FIPS provider for all crypto (requires OpenSSL 3.x built with FIPS).
+fips = ["dep:openssl"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# Default backend (pure Rust)
+digest = "0.10"
+ed25519-dalek = { workspace = true }
+generic-array = "0.14"
+hmac = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+# FIPS backend (optional)
+openssl = { workspace = true, optional = true }

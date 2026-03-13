@@ -28,17 +28,28 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Duration, Utc};
 use data_encoding::BASE64URL_NOPAD;
-use ed25519_dalek::{Digest, DigestSigner, DigestVerifier, Signer, Verifier};
-use hmac::{Hmac, Mac};
-use rand::rngs::OsRng;
-use rand::{RngCore as _, TryRngCore as _};
 use relay_common::time::UnixTimestamp;
+use relay_crypto::{
+    ed25519_generate_keypair as crypto_generate_keypair,
+    ed25519_public_from_secret, ed25519_sign, ed25519_sign_prehashed, ed25519_verify,
+    ed25519_verify_prehashed, fill_random_bytes, hmac_sha512, sha512,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sha2::Sha512;
 use uuid::Uuid;
 
 include!(concat!(env!("OUT_DIR"), "/constants.gen.rs"));
+
+/// Constant-time equality comparison for HMAC verification.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
 
 /// The latest Relay version known to this Relay. This is the current version.
 const LATEST_VERSION: RelayVersion = RelayVersion::new(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
@@ -203,7 +214,8 @@ impl Default for SignatureHeader {
 /// on the wire as opaque ascii encoded strings of arbitrary format or length.
 #[derive(Clone)]
 pub struct SecretKey {
-    inner: ed25519_dalek::SigningKey,
+    /// Raw secret: 32 bytes (seed) or 64 bytes (keypair: seed || public).
+    inner: Vec<u8>,
 }
 
 /// Represents the final registration.
@@ -212,13 +224,13 @@ pub struct Registration {
     relay_id: RelayId,
 }
 
-/// Creates a digest for signature verification/signing.
-fn create_digest(header: &[u8], data: &[u8]) -> Sha512 {
-    let mut digest = Sha512::default();
-    digest.update(header);
-    digest.update(b"\x00");
-    digest.update(data);
-    digest
+/// Creates the SHA-512 digest for prehashed signature (header \x00 data).
+fn create_digest_bytes(header: &[u8], data: &[u8]) -> [u8; 64] {
+    let mut input = Vec::with_capacity(header.len() + 1 + data.len());
+    input.extend_from_slice(header);
+    input.push(b'\x00');
+    input.extend_from_slice(data);
+    sha512(&input)
 }
 
 impl SecretKey {
@@ -238,22 +250,22 @@ impl SecretKey {
         let mut header =
             serde_json::to_vec(&sig_header).expect("attempted to pack non json safe header");
         let header_encoded = BASE64URL_NOPAD.encode(&header);
-        let sig = match sig_header
+        let sig_bytes = match sig_header
             .signature_algorithm
             .unwrap_or(SignatureAlgorithm::Regular)
         {
             SignatureAlgorithm::Regular => {
                 header.push(b'\x00');
                 header.extend_from_slice(data);
-                self.inner.sign(&header)
+                ed25519_sign(&header, &self.inner)
             }
             SignatureAlgorithm::Prehashed => {
-                let digest = create_digest(&header, data);
-                self.inner.sign_digest(digest)
+                let digest = create_digest_bytes(&header, data);
+                ed25519_sign_prehashed(&digest, &self.inner)
             }
         };
 
-        let mut sig_encoded = BASE64URL_NOPAD.encode(&sig.to_bytes());
+        let mut sig_encoded = BASE64URL_NOPAD.encode(&sig_bytes);
         sig_encoded.push('.');
         sig_encoded.push_str(&header_encoded);
         Signature(sig_encoded)
@@ -280,7 +292,20 @@ impl SecretKey {
 
 impl PartialEq for SecretKey {
     fn eq(&self, other: &SecretKey) -> bool {
-        self.inner.to_keypair_bytes() == other.inner.to_keypair_bytes()
+        self.to_keypair_bytes() == other.to_keypair_bytes()
+    }
+}
+
+impl SecretKey {
+    /// Returns the keypair bytes (64 bytes: secret || public), or secret+derived public if only 32 bytes stored.
+    fn to_keypair_bytes(&self) -> Vec<u8> {
+        if self.inner.len() == 64 {
+            self.inner.clone()
+        } else {
+            let mut out = self.inner.clone();
+            out.extend_from_slice(&ed25519_public_from_secret(&self.inner));
+            out
+        }
     }
 }
 
@@ -295,29 +320,25 @@ impl FromStr for SecretKey {
             _ => return Err(KeyParseError::BadEncoding),
         };
 
-        let inner = if let Ok(keypair) = bytes.as_slice().try_into() {
-            ed25519_dalek::SigningKey::from_keypair_bytes(&keypair)
-                .map_err(|_| KeyParseError::BadKey)?
-        } else if let Ok(secret_key) = bytes.try_into() {
-            ed25519_dalek::SigningKey::from_bytes(&secret_key)
+        if bytes.len() == 32 || bytes.len() == 64 {
+            Ok(SecretKey { inner: bytes })
         } else {
-            return Err(KeyParseError::BadKey);
-        };
-
-        Ok(SecretKey { inner })
+            Err(KeyParseError::BadKey)
+        }
     }
 }
 
 impl fmt::Display for SecretKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if f.alternate() {
-            write!(
-                f,
-                "{}",
-                BASE64URL_NOPAD.encode(&self.inner.to_keypair_bytes())
-            )
+            write!(f, "{}", BASE64URL_NOPAD.encode(&self.to_keypair_bytes()))
         } else {
-            write!(f, "{}", BASE64URL_NOPAD.encode(&self.inner.to_bytes()))
+            let secret = if self.inner.len() == 64 {
+                &self.inner[..32]
+            } else {
+                self.inner.as_slice()
+            };
+            write!(f, "{}", BASE64URL_NOPAD.encode(secret))
         }
     }
 }
@@ -337,7 +358,7 @@ relay_common::impl_str_serde!(SecretKey, "a secret key");
 /// on the wire as opaque ascii encoded strings of arbitrary format or length.
 #[derive(Clone, Eq, PartialEq)]
 pub struct PublicKey {
-    inner: ed25519_dalek::VerifyingKey,
+    inner: [u8; 32],
 }
 
 impl PublicKey {
@@ -349,7 +370,7 @@ impl PublicKey {
             Some(sig_encoded) => BASE64URL_NOPAD.decode(sig_encoded.as_bytes()).ok()?,
             None => return None,
         };
-        let sig = ed25519_dalek::Signature::from_slice(&sig_bytes).ok()?;
+        let sig_array: [u8; 64] = sig_bytes.as_slice().try_into().ok()?;
 
         let header = match iter.next() {
             Some(header_encoded) => BASE64URL_NOPAD.decode(header_encoded.as_bytes()).ok()?,
@@ -357,7 +378,7 @@ impl PublicKey {
         };
         let parsed: SignatureHeader = serde_json::from_slice(&header).ok()?;
 
-        let verification_result = match parsed
+        let valid = match parsed
             .signature_algorithm
             .unwrap_or(SignatureAlgorithm::Regular)
         {
@@ -365,14 +386,14 @@ impl PublicKey {
                 let mut to_verify = header.clone();
                 to_verify.push(b'\x00');
                 to_verify.extend_from_slice(data);
-                self.inner.verify(&to_verify, &sig)
+                ed25519_verify(&to_verify, &sig_array, &self.inner)
             }
             SignatureAlgorithm::Prehashed => {
-                let digest = create_digest(&header, data);
-                self.inner.verify_digest(digest, &sig)
+                let digest = create_digest_bytes(&header, data);
+                ed25519_verify_prehashed(&digest, &sig_array, &self.inner)
             }
         };
-        if verification_result.is_ok() {
+        if valid {
             Some(parsed)
         } else {
             None
@@ -438,11 +459,7 @@ impl FromStr for PublicKey {
             return Err(KeyParseError::BadEncoding);
         };
 
-        let inner = match bytes.try_into() {
-            Ok(bytes) => ed25519_dalek::VerifyingKey::from_bytes(&bytes)
-                .map_err(|_| KeyParseError::BadKey)?,
-            Err(_) => return Err(KeyParseError::BadKey),
-        };
+        let inner: [u8; 32] = bytes.as_slice().try_into().map_err(|_| KeyParseError::BadKey)?;
 
         Ok(PublicKey { inner })
     }
@@ -450,7 +467,7 @@ impl FromStr for PublicKey {
 
 impl fmt::Display for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", BASE64URL_NOPAD.encode(&self.inner.to_bytes()))
+        write!(f, "{}", BASE64URL_NOPAD.encode(&self.inner))
     }
 }
 
@@ -469,14 +486,12 @@ pub fn generate_relay_id() -> RelayId {
 
 /// Generates a secret + public key pair.
 pub fn generate_key_pair() -> (SecretKey, PublicKey) {
-    let mut csprng = OsRng;
-    let mut secret = [0; 32];
-    csprng
-        .try_fill_bytes(&mut secret)
-        .expect("os rng should be available");
-    let kp = ed25519_dalek::SigningKey::from_bytes(&secret);
-    let pk = kp.verifying_key();
-    (SecretKey { inner: kp }, PublicKey { inner: pk })
+    let (secret, public) = crypto_generate_keypair();
+    let keypair_bytes: Vec<u8> = secret.iter().chain(public.iter()).copied().collect();
+    (
+        SecretKey { inner: keypair_bytes },
+        PublicKey { inner: public },
+    )
 }
 
 /// An encoded and signed `RegisterState`.
@@ -501,19 +516,13 @@ pub fn generate_key_pair() -> (SecretKey, PublicKey) {
 pub struct SignedRegisterState(String);
 
 impl SignedRegisterState {
-    /// Creates an Hmac instance for signing the `RegisterState`.
-    fn mac(secret: &[u8]) -> Hmac<Sha512> {
-        Hmac::new_from_slice(secret).expect("HMAC takes variable keys")
-    }
-
     /// Signs the given `RegisterState` and serializes it into a single string.
     fn sign(state: RegisterState, secret: &[u8]) -> Self {
         let json = serde_json::to_string(&state).expect("relay register state serializes to JSON");
         let token = BASE64URL_NOPAD.encode(json.as_bytes());
 
-        let mut mac = Self::mac(secret);
-        mac.update(token.as_bytes());
-        let signature = BASE64URL_NOPAD.encode(&mac.finalize().into_bytes());
+        let signature_bytes = hmac_sha512(secret, token.as_bytes());
+        let signature = BASE64URL_NOPAD.encode(&signature_bytes);
 
         Self(format!("{token}:{signature}"))
     }
@@ -543,10 +552,10 @@ impl SignedRegisterState {
             .decode(signature.as_bytes())
             .map_err(|_| UnpackError::BadEncoding)?;
 
-        let mut mac = Self::mac(secret);
-        mac.update(token.as_bytes());
-        mac.verify_slice(&code)
-            .map_err(|_| UnpackError::BadSignature)?;
+        let expected = hmac_sha512(secret, token.as_bytes());
+        if code.len() != expected.len() || !constant_time_eq(code.as_slice(), &expected) {
+            return Err(UnpackError::BadSignature);
+        }
 
         let json = BASE64URL_NOPAD
             .decode(token.as_bytes())
@@ -603,9 +612,8 @@ impl RegisterState {
 
 /// Generates a new random token for the register state.
 fn nonce() -> String {
-    let mut rng = rand::rng();
     let mut bytes = vec![0u8; 64];
-    rng.fill_bytes(&mut bytes);
+    fill_random_bytes(&mut bytes);
     BASE64URL_NOPAD.encode(&bytes)
 }
 
@@ -1148,8 +1156,8 @@ mod tests {
         let mut to_sign = header.clone().into_bytes();
         to_sign.push(b'\x00');
         to_sign.extend_from_slice(data);
-        let sig = secret.inner.sign(to_sign.as_slice());
-        let mut sig_encoded = BASE64URL_NOPAD.encode(sig.to_bytes().as_slice());
+        let sig = ed25519_sign(to_sign.as_slice(), &secret.inner);
+        let mut sig_encoded = BASE64URL_NOPAD.encode(sig.as_slice());
         sig_encoded.push('.');
         sig_encoded.push_str(BASE64URL_NOPAD.encode(header.as_bytes()).as_str());
 

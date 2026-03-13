@@ -119,6 +119,10 @@ used for Relays operating as proxys. There are two optional features:
 - **`crash-handler`**: Allows native crash reporting for segfaults and
   out-of-memory situations when internal error reporting to Sentry is enabled.
 
+- **`fips`**: FIPS 140-3 compatibility. All cryptography (auth, HMAC, hashing, TLS)
+  uses OpenSSL's FIPS-validated provider. Requires OpenSSL 3.x built with FIPS.
+  See [docs/FIPS.md](docs/FIPS.md) for build and runtime instructions.
+
 To enable a feature, pass it to the cargo invocation. For example, to run tests
 across all workspace crates with the `processing` feature enabled, run:
 

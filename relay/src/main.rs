@@ -137,6 +137,11 @@ use relay_log::Hub;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub fn main() {
+    #[cfg(feature = "fips")]
+    {
+        relay_crypto::ensure_fips_loaded().expect("OpenSSL FIPS provider must load at startup");
+    }
+
     let exit_code = match cli::execute() {
         Ok(()) => 0,
         Err(err) => {

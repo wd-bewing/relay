@@ -47,6 +47,7 @@ relay-common = { path = "relay-common" }
 relay-config = { path = "relay-config" }
 relay-conventions = { path = "relay-conventions" }
 relay-crash = { path = "relay-crash" }
+relay-crypto = { path = "relay-crypto" }
 relay-dynamic-config = { path = "relay-dynamic-config" }
 relay-event-derive = { path = "relay-event-derive" }
 relay-event-normalization = { path = "relay-event-normalization" }
@@ -147,6 +148,7 @@ metrics-exporter-dogstatsd = "0.9.6"
 num-traits = "0.2.19"
 num_cpus = "1.17.0"
 objectstore-client = "0.1.0"
+openssl = "0.10.64"
 opentelemetry-semantic-conventions = { version = "0.31.0" }
 opentelemetry-proto = { version = "0.31.0", default-features = false }
 papaya = "0.2.3"

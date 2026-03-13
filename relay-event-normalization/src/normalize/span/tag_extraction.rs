@@ -9,6 +9,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 use relay_base_schema::metrics::{DurationUnit, InformationUnit, MetricUnit};
+use relay_crypto::sha256;
 use relay_event_schema::protocol::{
     AppContext, BrowserContext, DeviceContext, Event, GpuContext, Measurement, MonitorContext,
     OsContext, ProfileContext, RuntimeContext, SentryTags, Span, Timestamp, TraceContext,
@@ -946,7 +947,8 @@ pub fn extract_tags(
             // group tag mustn't be affected by this, and still be
             // computed from the full, untruncated description.
 
-            let mut span_group = format!("{:?}", md5::compute(&scrubbed_desc));
+            let hash = sha256(scrubbed_desc.as_bytes());
+            let mut span_group = hex::encode(hash);
             span_group.truncate(16);
             span_tags.group = span_group.into();
 

@@ -1,10 +1,8 @@
-use hmac::{Hmac, Mac};
-
+use relay_crypto::hmac_sha256;
 use relay_event_schema::processor::{
     self, ProcessValue, ProcessingResult, ProcessingState, Processor, ValueType,
 };
 use relay_event_schema::protocol::{AsPair, PairList};
-use sha1::Sha1;
 
 pub fn process_pairlist<P: Processor, T: ProcessValue + AsPair>(
     slf: &mut P,
@@ -38,8 +36,9 @@ pub fn process_pairlist<P: Processor, T: ProcessValue + AsPair>(
     Ok(())
 }
 
+/// Returns an HMAC-SHA256-based hash of `data` (empty key) as uppercase hex.
+/// Uses FIPS-approved HMAC-SHA256; output is 64 hex chars (32 bytes).
 pub fn hash_value(data: &[u8]) -> String {
-    let mut mac = Hmac::<Sha1>::new_from_slice(&[]).unwrap();
-    mac.update(data);
-    format!("{:X}", mac.finalize().into_bytes())
+    let mac = hmac_sha256(&[], data);
+    hex::encode_upper(mac)
 }
